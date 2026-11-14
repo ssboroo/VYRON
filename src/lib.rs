@@ -186,6 +186,9 @@ impl Parser {
             self.expect(TokenKind::Semicolon, "expected ';' after return statement")?;
             Some(value)
         } else { None };
+        if matches!(self.current().kind, TokenKind::Eof) {
+            return Err(Diagnostic::new("unterminated function body", self.current().offset));
+        }
         self.expect(TokenKind::RBrace, "expected '}' after function body")?;
         Ok(FunctionDecl { name, return_type, effects, return_value })
     }
@@ -317,6 +320,9 @@ fn check_function_types(module: &Module) -> Result<(), Diagnostic> {
     for function in &module.functions {
         let expected = match &function.return_type {
             Some(name) => parse_type(name)?,
+            None if function.return_value.is_some() => return Err(Diagnostic::new(
+                format!("function '{}' does not declare a return type", function.name), 0
+            )),
             None => Type::Unit,
         };
         match (&expected, &function.return_value) {
