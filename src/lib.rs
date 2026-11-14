@@ -19,7 +19,7 @@ impl std::error::Error for Diagnostic {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenKind {
-    Ident(String), Number(String), String(String), Fn, Effect, Module, Return,
+    Ident(String), Number(String), String(String), Boolean(bool), Fn, Effect, Module, Return,
     Arrow, Bang, LBrace, RBrace, LParen, RParen, Colon, Comma, Semicolon,
     Other(char), Eof,
 }
@@ -46,6 +46,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostic> {
             let kind = match word.as_str() {
                 "fn" => TokenKind::Fn, "effect" => TokenKind::Effect,
                 "module" => TokenKind::Module, "return" => TokenKind::Return,
+                "true" => TokenKind::Boolean(true), "false" => TokenKind::Boolean(false),
                 _ => TokenKind::Ident(word),
             };
             tokens.push(Token { kind, offset });
@@ -99,7 +100,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostic> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FunctionDecl { pub name: String, pub return_type: Option<String>, pub effects: Vec<String> }
+pub struct FunctionDecl { pub name: String, pub return_type: Option<String>, pub effects: Vec<String>, pub return_value: Option<Literal> }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Module { pub name: Option<String>, pub effects: Vec<String>, pub functions: Vec<FunctionDecl> }
 
@@ -145,6 +146,15 @@ impl Parser {
         }
         Ok(module)
     }
+    fn parse_literal(&mut self) -> Result<Literal, Diagnostic> {
+        let token = self.advance();
+        match token.kind {
+            TokenKind::Number(value) => Ok(Literal::IntegerText(value)),
+            TokenKind::String(value) => Ok(Literal::String(value)),
+            TokenKind::Boolean(value) => Ok(Literal::Boolean(value)),
+            _ => Err(Diagnostic::new("expected a literal return value", token.offset)),
+        }
+    }
     fn parse_function(&mut self) -> Result<FunctionDecl, Diagnostic> {
         self.expect(TokenKind::Fn, "expected 'fn'")?;
         let name = self.take_ident("expected function name")?;
@@ -166,17 +176,18 @@ impl Parser {
             self.expect(TokenKind::RBrace, "expected '}' after effect list")?;
         }
         self.expect(TokenKind::LBrace, "expected function body")?;
-        let mut depth = 1usize;
-        while depth > 0 {
-            let token = self.advance();
-            match token.kind {
-                TokenKind::LBrace => depth += 1,
-                TokenKind::RBrace => depth -= 1,
-                TokenKind::Eof => return Err(Diagnostic::new("unterminated function body", token.offset)),
-                _ => {}
-            }
-        }
-        Ok(FunctionDecl { name, return_type, effects })
+        let return_value = if matches!(self.current().kind, TokenKind::Return) {
+            self.advance();
+            let value = if matches!(self.current().kind, TokenKind::Semicolon) {
+                Literal::Unit
+            } else {
+                self.parse_literal()?
+            };
+            self.expect(TokenKind::Semicolon, "expected ';' after return statement")?;
+            Some(value)
+        } else { None };
+        self.expect(TokenKind::RBrace, "expected '}' after function body")?;
+        Ok(FunctionDecl { name, return_type, effects, return_value })
     }
 }
 
@@ -195,6 +206,7 @@ pub fn check_effects(module: &Module) -> Result<(), Diagnostic> {
 pub fn check(source: &str) -> Result<Module, Diagnostic> {
     let module = parse(source)?;
     check_effects(&module)?;
+    check_function_types(&module)?;
     Ok(module)
 }
 
@@ -288,4 +300,91 @@ pub fn check_return_type(expected: &Type, value: &Literal) -> Result<Type, Diagn
         ));
     }
     Ok(actual)
+}
+
+
+fn parse_type(name: &str) -> Result<Type, Diagnostic> {
+    match name {
+        "i64" => Ok(Type::I64),
+        "bool" => Ok(Type::Bool),
+        "string" => Ok(Type::String),
+        "unit" => Ok(Type::Unit),
+        other => Err(Diagnostic::new(format!("unknown return type '{}'", other), 0)),
+    }
+}
+
+fn check_function_types(module: &Module) -> Result<(), Diagnostic> {
+    for function in &module.functions {
+        let expected = match &function.return_type {
+            Some(name) => parse_type(name)?,
+            None => Type::Unit,
+        };
+        match (&expected, &function.return_value) {
+            (Type::Unit, None) => {}
+            (Type::Unit, Some(value)) => { check_return_type(&Type::Unit, value)?; }
+            (_, None) => return Err(Diagnostic::new(
+                format!("function '{}' must return a value of type {}", function.name, expected), 0
+            )),
+            (_, Some(value)) => { check_return_type(&expected, value)?; }
+        }
+    }
+    Ok(())
+}
+
+/// A typed, deterministic intermediate representation for the supported
+/// literal-return subset of VYRON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Instruction {
+    ConstI64(i64),
+    ConstBool(bool),
+    ConstString(String),
+    Return,
+    ReturnUnit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedFunction {
+    pub name: String,
+    pub return_type: Type,
+    pub effects: Vec<String>,
+    pub instructions: Vec<Instruction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TypedModule {
+    pub name: Option<String>,
+    pub functions: Vec<TypedFunction>,
+}
+
+/// Parses, type-checks, and lowers a source module into the initial VYRON IR.
+pub fn lower_to_ir(source: &str) -> Result<TypedModule, Diagnostic> {
+    let module = check(source)?;
+    let mut functions = Vec::with_capacity(module.functions.len());
+    for function in module.functions {
+        let return_type = match function.return_type.as_deref() {
+            Some(name) => parse_type(name)?,
+            None => Type::Unit,
+        };
+        let mut instructions = Vec::new();
+        match function.return_value {
+            Some(Literal::Integer(value)) => instructions.push(Instruction::ConstI64(value)),
+            Some(Literal::IntegerText(value)) => {
+                let parsed = value.parse::<i64>().map_err(|_| Diagnostic::new(
+                    format!("integer literal '{}' is outside the i64 range", value), 0
+                ))?;
+                instructions.push(Instruction::ConstI64(parsed));
+            }
+            Some(Literal::Boolean(value)) => instructions.push(Instruction::ConstBool(value)),
+            Some(Literal::String(value)) => instructions.push(Instruction::ConstString(value)),
+            Some(Literal::Unit) | None => {}
+        }
+        instructions.push(if return_type == Type::Unit { Instruction::ReturnUnit } else { Instruction::Return });
+        functions.push(TypedFunction {
+            name: function.name,
+            return_type,
+            effects: function.effects,
+            instructions,
+        });
+    }
+    Ok(TypedModule { name: module.name, functions })
 }
