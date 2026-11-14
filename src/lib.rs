@@ -229,3 +229,63 @@ mod tests {
         assert!(parse("fn main() {").unwrap_err().message.contains("unterminated"));
     }
 }
+
+
+/// Primitive types supported by the first VYRON type-checking milestone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Type {
+    I64,
+    Bool,
+    String,
+    Unit,
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Type::I64 => write!(f, "i64"),
+            Type::Bool => write!(f, "bool"),
+            Type::String => write!(f, "string"),
+            Type::Unit => write!(f, "unit"),
+        }
+    }
+}
+
+/// Literal values understood by the primitive type checker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Literal {
+    Integer(i64),
+    /// Decimal integer source text, retained so overflow is diagnosed.
+    IntegerText(String),
+    Boolean(bool),
+    String(String),
+    Unit,
+}
+
+impl Literal {
+    fn value_type(&self) -> Result<Type, Diagnostic> {
+        match self {
+            Literal::Integer(_) => Ok(Type::I64),
+            Literal::IntegerText(text) => {
+                text.parse::<i64>().map_err(|_| Diagnostic::new(
+                    format!("integer literal '{}' is outside the i64 range", text), 0
+                ))?;
+                Ok(Type::I64)
+            }
+            Literal::Boolean(_) => Ok(Type::Bool),
+            Literal::String(_) => Ok(Type::String),
+            Literal::Unit => Ok(Type::Unit),
+        }
+    }
+}
+
+/// Checks that a function's returned literal is assignable to its declared type.
+pub fn check_return_type(expected: &Type, value: &Literal) -> Result<Type, Diagnostic> {
+    let actual = value.value_type()?;
+    if &actual != expected {
+        return Err(Diagnostic::new(
+            format!("type mismatch: expected {}, found {}", expected, actual), 0
+        ));
+    }
+    Ok(actual)
+}
