@@ -9,15 +9,17 @@ The project is being developed from first principles. It is not an AI framework:
 This first milestone establishes the language front-end:
 - Rust project and command-line entry point
 - Lexer for identifiers, numeric and string literals, comments, and core punctuation
-- Parser for modules, effect declarations, function declarations, and literal return statements
+- Parser for modules, effect declarations, zero-argument functions, and return expressions
+- Integer expression parser with precedence, parentheses, and unary minus
 - Effect checker that rejects undeclared effects
 - Parser-integrated return type checking for i64, bool, string, and unit
-- Typed intermediate representation (IR) for literal-return functions
+- Constant-expression checks for i64 overflow and division by zero
+- Typed intermediate representation (IR) with integer arithmetic instructions
 - CLI commands for source checking and IR inspection
-- Unit and integration tests for valid syntax, type errors, overflow, and IR lowering
-- Minimal .vyr example
+- Unit and integration tests for syntax, type errors, expression semantics, and IR lowering
+- Minimal .vyr examples
 
-The grammar is deliberately small: functions currently take no parameters and support at most one literal return statement. General expressions, local variables, control flow, function calls, bytecode generation, and a runtime remain future milestones.
+The grammar is deliberately small: functions currently take no parameters and support one return expression. Local variables, control flow, function calls, bytecode generation, and a runtime remain future milestones.
 
 ## Syntax preview
 
@@ -37,11 +39,13 @@ Requires the Rust stable toolchain.
     cargo test
     cargo run -- check examples/hello.vyr
     cargo run -- ir examples/hello.vyr
+    cargo run -- check examples/arithmetic.vyr
+    cargo run -- ir examples/arithmetic.vyr
 
 ## Roadmap
 
 1. Front-end hardening: source spans, diagnostics, parser recovery, grammar tests.
-2. Type system: parameters, variables, operators, and expression typing.
+2. Type system: parameters, variables, comparisons, logical operators, and full expression typing.
 3. Effect system: effect propagation, call-graph validation, capability boundaries.
 4. Intermediate representation: complete typed AST, control-flow blocks, and deterministic lowering.
 5. Compiler: bytecode generation, verifier, and executable artifact format.
