@@ -1,0 +1,14 @@
+[package]
+name = "vyron"
+version = "0.1.0"
+edition = "2021"
+description = "VYRON — an effect-aware systems programming language"
+license = "MIT"
+
+[[bin]]
+name = "vyron"
+path = "src/main.rs"
+
+[lib]
+name = "vyron"
+path = "src/lib.rs"
