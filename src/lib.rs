@@ -159,7 +159,7 @@ impl Parser {
             TokenKind::Number(value) => Ok(Expression::Literal(Literal::IntegerText(value))),
             TokenKind::String(value) => Ok(Expression::Literal(Literal::String(value))),
             TokenKind::Boolean(value) => Ok(Expression::Literal(Literal::Boolean(value))),
-            TokenKind::Other('(') => {
+            TokenKind::LParen => {
                 let expression = self.parse_expression()?;
                 self.expect(TokenKind::RParen, "expected ')' after expression")?;
                 Ok(expression)
@@ -230,7 +230,7 @@ impl Parser {
         let return_value = if matches!(self.current().kind, TokenKind::Return) {
             self.advance();
             let value = if matches!(self.current().kind, TokenKind::Semicolon) {
-                Literal::Unit
+                Expression::Literal(Literal::Unit)
             } else {
                 self.parse_expression()?
             };
