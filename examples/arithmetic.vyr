@@ -1,0 +1,5 @@
+module arithmetic;
+
+fn calculate() -> i64 {
+    return (10 + 2) * 3 - 4 / 2;
+}
