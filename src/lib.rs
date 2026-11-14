@@ -100,7 +100,14 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostic> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FunctionDecl { pub name: String, pub return_type: Option<String>, pub effects: Vec<String>, pub return_value: Option<Literal> }
+pub enum Expression {
+    Literal(Literal),
+    UnaryMinus(Box<Expression>),
+    Binary { operator: char, left: Box<Expression>, right: Box<Expression> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionDecl { pub name: String, pub return_type: Option<String>, pub effects: Vec<String>, pub return_value: Option<Expression> }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Module { pub name: Option<String>, pub effects: Vec<String>, pub functions: Vec<FunctionDecl> }
 
@@ -146,14 +153,58 @@ impl Parser {
         }
         Ok(module)
     }
-    fn parse_literal(&mut self) -> Result<Literal, Diagnostic> {
+    fn parse_primary(&mut self) -> Result<Expression, Diagnostic> {
         let token = self.advance();
         match token.kind {
-            TokenKind::Number(value) => Ok(Literal::IntegerText(value)),
-            TokenKind::String(value) => Ok(Literal::String(value)),
-            TokenKind::Boolean(value) => Ok(Literal::Boolean(value)),
-            _ => Err(Diagnostic::new("expected a literal return value", token.offset)),
+            TokenKind::Number(value) => Ok(Expression::Literal(Literal::IntegerText(value))),
+            TokenKind::String(value) => Ok(Expression::Literal(Literal::String(value))),
+            TokenKind::Boolean(value) => Ok(Expression::Literal(Literal::Boolean(value))),
+            TokenKind::Other('(') => {
+                let expression = self.parse_expression()?;
+                self.expect(TokenKind::RParen, "expected ')' after expression")?;
+                Ok(expression)
+            }
+            _ => Err(Diagnostic::new("expected an expression", token.offset)),
         }
+    }
+    fn parse_unary(&mut self) -> Result<Expression, Diagnostic> {
+        if matches!(self.current().kind, TokenKind::Other('-')) {
+            self.advance();
+            return Ok(Expression::UnaryMinus(Box::new(self.parse_unary()?)));
+        }
+        self.parse_primary()
+    }
+    fn parse_multiplicative(&mut self) -> Result<Expression, Diagnostic> {
+        let mut expression = self.parse_unary()?;
+        loop {
+            let operator = match self.current().kind {
+                TokenKind::Other('*') => '*',
+                TokenKind::Other('/') => '/',
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_unary()?;
+            expression = Expression::Binary {
+                operator, left: Box::new(expression), right: Box::new(right),
+            };
+        }
+        Ok(expression)
+    }
+    fn parse_expression(&mut self) -> Result<Expression, Diagnostic> {
+        let mut expression = self.parse_multiplicative()?;
+        loop {
+            let operator = match self.current().kind {
+                TokenKind::Other('+') => '+',
+                TokenKind::Other('-') => '-',
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_multiplicative()?;
+            expression = Expression::Binary {
+                operator, left: Box::new(expression), right: Box::new(right),
+            };
+        }
+        Ok(expression)
     }
     fn parse_function(&mut self) -> Result<FunctionDecl, Diagnostic> {
         self.expect(TokenKind::Fn, "expected 'fn'")?;
@@ -181,7 +232,7 @@ impl Parser {
             let value = if matches!(self.current().kind, TokenKind::Semicolon) {
                 Literal::Unit
             } else {
-                self.parse_literal()?
+                self.parse_expression()?
             };
             self.expect(TokenKind::Semicolon, "expected ';' after return statement")?;
             Some(value)
@@ -327,11 +378,19 @@ fn check_function_types(module: &Module) -> Result<(), Diagnostic> {
         };
         match (&expected, &function.return_value) {
             (Type::Unit, None) => {}
-            (Type::Unit, Some(value)) => { check_return_type(&Type::Unit, value)?; }
+            (Type::Unit, Some(Expression::Literal(value))) => { check_return_type(&Type::Unit, value)?; }
             (_, None) => return Err(Diagnostic::new(
                 format!("function '{}' must return a value of type {}", function.name, expected), 0
             )),
-            (_, Some(value)) => { check_return_type(&expected, value)?; }
+            (_, Some(value)) => {
+                let actual = expression_type(value)?;
+                if actual != expected {
+                    return Err(Diagnostic::new(
+                        format!("type mismatch: expected {}, found {}", expected, actual), 0
+                    ));
+                }
+                if actual == Type::I64 { evaluate_integer(value)?; }
+            }
         }
     }
     Ok(())
@@ -344,6 +403,11 @@ pub enum Instruction {
     ConstI64(i64),
     ConstBool(bool),
     ConstString(String),
+    AddI64,
+    SubI64,
+    MulI64,
+    DivI64,
+    NegI64,
     Return,
     ReturnUnit,
 }
@@ -372,17 +436,8 @@ pub fn lower_to_ir(source: &str) -> Result<TypedModule, Diagnostic> {
             None => Type::Unit,
         };
         let mut instructions = Vec::new();
-        match function.return_value {
-            Some(Literal::Integer(value)) => instructions.push(Instruction::ConstI64(value)),
-            Some(Literal::IntegerText(value)) => {
-                let parsed = value.parse::<i64>().map_err(|_| Diagnostic::new(
-                    format!("integer literal '{}' is outside the i64 range", value), 0
-                ))?;
-                instructions.push(Instruction::ConstI64(parsed));
-            }
-            Some(Literal::Boolean(value)) => instructions.push(Instruction::ConstBool(value)),
-            Some(Literal::String(value)) => instructions.push(Instruction::ConstString(value)),
-            Some(Literal::Unit) | None => {}
+        if let Some(expression) = function.return_value {
+            lower_expression(&expression, &mut instructions)?;
         }
         instructions.push(if return_type == Type::Unit { Instruction::ReturnUnit } else { Instruction::Return });
         functions.push(TypedFunction {
@@ -393,4 +448,84 @@ pub fn lower_to_ir(source: &str) -> Result<TypedModule, Diagnostic> {
         });
     }
     Ok(TypedModule { name: module.name, functions })
+}
+
+
+fn expression_type(expression: &Expression) -> Result<Type, Diagnostic> {
+    match expression {
+        Expression::Literal(value) => value.value_type(),
+        Expression::UnaryMinus(inner) => {
+            let actual = expression_type(inner)?;
+            if actual != Type::I64 {
+                return Err(Diagnostic::new("unary '-' requires an i64 operand", 0));
+            }
+            Ok(Type::I64)
+        }
+        Expression::Binary { operator, left, right } => {
+            let left_type = expression_type(left)?;
+            let right_type = expression_type(right)?;
+            if left_type != Type::I64 || right_type != Type::I64 {
+                return Err(Diagnostic::new(
+                    format!("operator '{}' requires i64 operands", operator), 0
+                ));
+            }
+            Ok(Type::I64)
+        }
+    }
+}
+
+fn evaluate_integer(expression: &Expression) -> Result<i64, Diagnostic> {
+    match expression {
+        Expression::Literal(Literal::Integer(value)) => Ok(*value),
+        Expression::Literal(Literal::IntegerText(value)) => value.parse::<i64>().map_err(|_| {
+            Diagnostic::new(format!("integer literal '{}' is outside the i64 range", value), 0)
+        }),
+        Expression::UnaryMinus(inner) => evaluate_integer(inner)?.checked_neg()
+            .ok_or_else(|| Diagnostic::new("constant expression overflows i64", 0)),
+        Expression::Binary { operator, left, right } => {
+            let lhs = evaluate_integer(left)?;
+            let rhs = evaluate_integer(right)?;
+            let result = match operator {
+                '+' => lhs.checked_add(rhs),
+                '-' => lhs.checked_sub(rhs),
+                '*' => lhs.checked_mul(rhs),
+                '/' if rhs == 0 => return Err(Diagnostic::new("division by zero in constant expression", 0)),
+                '/' => lhs.checked_div(rhs),
+                _ => None,
+            };
+            result.ok_or_else(|| Diagnostic::new("constant expression overflows i64", 0))
+        }
+        _ => Err(Diagnostic::new("expression is not an integer constant", 0)),
+    }
+}
+
+fn lower_expression(expression: &Expression, instructions: &mut Vec<Instruction>) -> Result<(), Diagnostic> {
+    match expression {
+        Expression::Literal(Literal::Integer(value)) => instructions.push(Instruction::ConstI64(*value)),
+        Expression::Literal(Literal::IntegerText(value)) => {
+            let parsed = value.parse::<i64>().map_err(|_| Diagnostic::new(
+                format!("integer literal '{}' is outside the i64 range", value), 0
+            ))?;
+            instructions.push(Instruction::ConstI64(parsed));
+        }
+        Expression::Literal(Literal::Boolean(value)) => instructions.push(Instruction::ConstBool(*value)),
+        Expression::Literal(Literal::String(value)) => instructions.push(Instruction::ConstString(value.clone())),
+        Expression::Literal(Literal::Unit) => {}
+        Expression::UnaryMinus(inner) => {
+            lower_expression(inner, instructions)?;
+            instructions.push(Instruction::NegI64);
+        }
+        Expression::Binary { operator, left, right } => {
+            lower_expression(left, instructions)?;
+            lower_expression(right, instructions)?;
+            instructions.push(match operator {
+                '+' => Instruction::AddI64,
+                '-' => Instruction::SubI64,
+                '*' => Instruction::MulI64,
+                '/' => Instruction::DivI64,
+                other => return Err(Diagnostic::new(format!("unsupported operator '{}'", other), 0)),
+            });
+        }
+    }
+    Ok(())
 }
