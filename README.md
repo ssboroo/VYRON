@@ -14,7 +14,7 @@ This first milestone establishes the language front-end:
 - Unit tests for valid syntax and malformed input
 - Minimal .vyr example
 
-The current parser intentionally supports a narrow grammar. Function parameters, executable statements, type inference, bytecode generation, and a runtime are future milestones, not features claimed by this release.
+The current parser intentionally supports a narrow grammar. The primitive type-checking API currently validates literal return values for i64, bool, string, and unit, including i64 overflow. It is the first isolated type-system stage; parser-integrated expression typing, function parameters, bytecode generation, and a runtime remain future milestones.
 
 ## Syntax preview
 
@@ -37,7 +37,7 @@ Requires the Rust stable toolchain.
 ## Roadmap
 
 1. Front-end hardening: source spans, diagnostics, parser recovery, grammar tests.
-2. Type system: primitive types, function signatures, expression typing.
+2. Type system: expand primitive typing into parsed return expressions, function signatures, and expression typing.
 3. Effect system: effect propagation, call-graph validation, capability boundaries.
 4. Intermediate representation: typed IR and deterministic lowering.
 5. Compiler: bytecode generation and validation.
